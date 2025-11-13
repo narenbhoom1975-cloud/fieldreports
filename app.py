@@ -1,136 +1,121 @@
-from flask import Flask, request, send_from_directory, redirect, make_response
+from flask import Flask, render_template_string, request, redirect, send_from_directory
 from openpyxl import Workbook, load_workbook
 import os
-import datetime
-from zipfile import ZipFile
+from datetime import datetime
 
 app = Flask(__name__)
+UPLOAD_FOLDER = "uploads"
+EXCEL_FILE = "reports.xlsx"
 
-ADMIN_PASSWORD = "password123"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Create storage folders
-if not os.path.exists("voice_reports"):
-    os.makedirs("voice_reports")
-
-# Create Excel file if missing
-if not os.path.exists("reports.xlsx"):
+# Create Excel file if not exists
+if not os.path.exists(EXCEL_FILE):
     wb = Workbook()
     ws = wb.active
-    ws.append(["Engineer", "Date", "Audio File"])
-    wb.save("reports.xlsx")
+    ws.append(["Date", "Engineer Name", "Client Name", "Problem", "Solution", "Voice File"])
+    wb.save(EXCEL_FILE)
 
+# HTML Form
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Field Report</title>
+</head>
+<body>
+  return """
+<h2>Engineer Voice Report</h2>
+
+<label>Engineer Name:</label><br>
+<input id="name" required><br><br>
+
+<label>Record Voice:</label><br>
+
+<button onclick="startRecording()">🎙 Start Recording</button>
+<button onclick="stopRecording()" disabled id="stopBtn">⏹ Stop Recording</button>
+
+<p id="status"></p>
+
+<form id="reportForm" method="POST" action="/submit" enctype="multipart/form-data" style="display:none;">
+    <input type="hidden" name="name" id="hiddenName">
+    <input type="file" name="audio" id="audioFile">
+</form>
+
+<script>
+let mediaRecorder;
+let audioChunks = [];
+
+async function startRecording() {
+    document.getElementById("status").innerHTML = "Recording...";
+    document.getElementById("stopBtn").disabled = false;
+
+    let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+
+    mediaRecorder.start();
+    audioChunks = [];
+
+    mediaRecorder.ondataavailable = e => {
+        audioChunks.push(e.data);
+    };
+}
+
+function stopRecording() {
+    mediaRecorder.stop();
+    document.getElementById("status").innerHTML = "Processing...";
+
+    mediaRecorder.onstop = () => {
+        const blob = new Blob(audioChunks, { type: "audio/mp3" });
+        const file = new File([blob], "recording.mp3");
+
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(file);
+
+        document.getElementById("audioFile").files = dataTransfer.files;
+
+        // set name
+        document.getElementById("hiddenName").value = document.getElementById("name").value;
+
+        // submit form automatically
+        document.getElementById("reportForm").submit();
+    };
+}
+</script>
+"""
+
+</body>
+</html>
+"""
 
 @app.route("/")
 def home():
-    return """
-    <h2>Engineer Voice Report</h2>
-    <form method="POST" action="/submit" enctype="multipart/form-data">
-        <label>Engineer Name:</label><br>
-        <input name="name" required><br><br>
-
-        <label>Record Voice:</label><br>
-        <input type="file" name="audio" accept="audio/*" required><br><br>
-
-        <button type="submit">Submit Report</button>
-    </form>
-    """
-
+    return render_template_string(HTML)
 
 @app.route("/submit", methods=["POST"])
 def submit():
-    name = request.form.get("name")
-    audio = request.files.get("audio")
+    engineer = request.form["engineer"]
+    client = request.form["client"]
+    problem = request.form["problem"]
+    solution = request.form["solution"]
 
-    if audio:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{name}_{timestamp}.mp3"
-        filepath = os.path.join("voice_reports", filename)
-        audio.save(filepath)
+    # Save voice file
+    voice = request.files["voice"]
+    filename = f"{engineer}_{datetime.now().strftime('%d-%m-%Y_%H-%M-%S')}.mp3"
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    voice.save(file_path)
 
-        # Save to Excel
-        wb = load_workbook("reports.xlsx")
-        ws = wb.active
-        ws.append([name, timestamp, filename])
-        wb.save("reports.xlsx")
+    # Save details to Excel
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb.active
+    ws.append([datetime.now().strftime("%d-%m-%Y %H:%M"), engineer, client, problem, solution, filename])
+    wb.save(EXCEL_FILE)
 
-    return "<h3>Report submitted successfully!</h3>"
+    return "<h3>✅ Report Submitted Successfully!</h3><a href='/'>Back</a>"
 
+@app.route("/uploads/<path:filename>")
+def download_file(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
-# -------- ADMIN PROTECTION --------
-
-def admin_protected(request):
-    pwd = request.cookies.get("admin_pass")
-    return pwd == ADMIN_PASSWORD
-
-
-@app.route("/admin_login", methods=["GET", "POST"])
-def admin_login():
-    if request.method == "GET":
-        return """
-        <h2>Admin Login</h2>
-        <form method="POST">
-            <input name="password" type="password" placeholder="Enter Password">
-            <button type="submit">Login</button>
-        </form>
-        """
-
-    password = request.form.get("password")
-
-    if password == ADMIN_PASSWORD:
-        resp = make_response(redirect("/admin"))
-        resp.set_cookie("admin_pass", ADMIN_PASSWORD)
-        return resp
-    else:
-        return "<h3>Wrong Password</h3>"
-
-
-@app.route("/admin")
-def admin():
-    if not admin_protected(request):
-        return redirect("/admin_login")
-
-    files = os.listdir("voice_reports")
-
-    page = """
-    <h2>Admin Panel</h2>
-    <a href='/download_excel'>📄 Download Excel Report</a><br><br>
-    <a href='/download_all_audio'>🎧 Download All Audio (ZIP)</a><br><br>
-    <h3>Individual Audio Files:</h3>
-    """
-
-    for f in files:
-        page += f"<a href='/audio/{f}' download>{f}</a><br>"
-
-    return page
-
-
-@app.route("/download_excel")
-def download_excel():
-    if not admin_protected(request):
-        return redirect("/admin_login")
-    return send_from_directory(".", "reports.xlsx", as_attachment=True)
-
-
-@app.route("/audio/<filename>")
-def download_audio(filename):
-    if not admin_protected(request):
-        return redirect("/admin_login")
-    return send_from_directory("voice_reports", filename, as_attachment=True)
-
-
-@app.route("/download_all_audio")
-def download_all_audio():
-    if not admin_protected(request):
-        return redirect("/admin_login")
-
-    zip_path = "all_audio.zip"
-    with ZipFile(zip_path, "w") as zipf:
-        for file in os.listdir("voice_reports"):
-            zipf.write(os.path.join("voice_reports", file), file)
-
-    return send_from_directory(".", zip_path, as_attachment=True)
-
-
-# -------- PORT FOR RENDER --------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=5000)
