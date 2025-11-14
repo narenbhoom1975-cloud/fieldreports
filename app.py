@@ -3,7 +3,6 @@ from openpyxl import Workbook, load_workbook
 import os
 import datetime
 from zipfile import ZipFile
-from pydub import AudioSegment
 
 app = Flask(__name__)
 ADMIN_PASSWORD = "password123"
@@ -11,9 +10,6 @@ ADMIN_PASSWORD = "password123"
 # Create storage folders
 if not os.path.exists("voice_reports"):
     os.makedirs("voice_reports")
-
-if not os.path.exists("temp_uploads"):
-    os.makedirs("temp_uploads")
 
 # Create Excel file if missing
 if not os.path.exists("reports.xlsx"):
@@ -36,6 +32,7 @@ def home():
             input[type="text"] { padding: 8px; width: 300px; font-size: 14px; }
             #status { color: #007bff; font-weight: bold; margin-top: 10px; }
             .recording { color: #dc3545; }
+            #timer { font-size: 20px; color: #dc3545; }
         </style>
     </head>
     <body>
@@ -46,6 +43,7 @@ def home():
         <label>Record Voice:</label><br>
         <button onclick="startRecording()" id="startBtn">🎙 Start Recording</button>
         <button onclick="stopRecording()" disabled id="stopBtn">⏹ Stop Recording</button>
+        <div id="timer"></div>
         <p id="status"></p>
         
         <form id="reportForm" method="POST" action="/submit" enctype="multipart/form-data" style="display:none;">
@@ -56,6 +54,16 @@ def home():
         <script>
         let mediaRecorder;
         let audioChunks = [];
+        let timerInterval;
+        let seconds = 0;
+        
+        function updateTimer() {
+            seconds++;
+            const mins = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            document.getElementById("timer").innerHTML = 
+                `Recording: ${mins}:${secs.toString().padStart(2, '0')}`;
+        }
         
         async function startRecording() {
             const nameInput = document.getElementById("name");
@@ -67,62 +75,99 @@ def home():
             try {
                 document.getElementById("startBtn").disabled = true;
                 document.getElementById("stopBtn").disabled = false;
-                document.getElementById("status").innerHTML = "🔴 Recording...";
+                document.getElementById("status").innerHTML = "🔴 Recording started...";
                 document.getElementById("status").className = "recording";
                 
-                // Request audio with specific constraints
+                seconds = 0;
+                timerInterval = setInterval(updateTimer, 1000);
+                
+                // Request audio with specific constraints for better quality
                 let stream = await navigator.mediaDevices.getUserMedia({ 
                     audio: {
                         echoCancellation: true,
                         noiseSuppression: true,
-                        sampleRate: 44100
+                        autoGainControl: true,
+                        sampleRate: 48000
                     } 
                 });
                 
-                // Try to use audio/webm;codecs=opus or fallback to default
-                let mimeType = 'audio/webm;codecs=opus';
-                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                // Try different MIME types for better compatibility
+                let options = { audioBitsPerSecond: 128000 };
+                let mimeType = '';
+                
+                // Try MP4 first (best compatibility)
+                if (MediaRecorder.isTypeSupported('audio/mp4')) {
+                    mimeType = 'audio/mp4';
+                    options.mimeType = mimeType;
+                }
+                // Try WebM with Opus codec
+                else if (MediaRecrecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                    mimeType = 'audio/webm;codecs=opus';
+                    options.mimeType = mimeType;
+                }
+                // Fallback to default WebM
+                else {
                     mimeType = 'audio/webm';
+                    options.mimeType = mimeType;
                 }
                 
-                mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: mimeType,
-                    audioBitsPerSecond: 128000
-                });
+                console.log('Using MIME type:', mimeType);
                 
+                mediaRecorder = new MediaRecorder(stream, options);
                 audioChunks = [];
                 
                 mediaRecorder.ondataavailable = e => {
                     if (e.data.size > 0) {
                         audioChunks.push(e.data);
+                        console.log('Audio chunk received:', e.data.size, 'bytes');
                     }
                 };
                 
-                mediaRecorder.start();
+                mediaRecorder.onerror = e => {
+                    console.error('MediaRecorder error:', e);
+                    document.getElementById("status").innerHTML = "❌ Recording error: " + e.error;
+                };
+                
+                // Start recording with timeslice to get data more frequently
+                mediaRecorder.start(1000);
                 
             } catch (err) {
                 document.getElementById("status").innerHTML = "❌ Error: " + err.message;
                 document.getElementById("startBtn").disabled = false;
                 document.getElementById("stopBtn").disabled = true;
-                console.error(err);
+                clearInterval(timerInterval);
+                console.error('Error starting recording:', err);
             }
         }
         
         function stopRecording() {
-            if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+            if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+                console.log('MediaRecorder not active');
+                return;
+            }
+            
+            clearInterval(timerInterval);
+            document.getElementById("timer").innerHTML = "";
             
             mediaRecorder.stop();
-            document.getElementById("status").innerHTML = "⏳ Processing and converting to MP3...";
+            document.getElementById("status").innerHTML = "⏳ Processing audio...";
             document.getElementById("stopBtn").disabled = true;
             
             mediaRecorder.onstop = async () => {
+                console.log('Recording stopped, processing', audioChunks.length, 'chunks');
+                
                 // Stop all audio tracks
-                mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                mediaRecorder.stream.getTracks().forEach(track => {
+                    track.stop();
+                    console.log('Track stopped:', track.kind);
+                });
                 
                 // Create blob from recorded chunks
-                const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                const mimeType = mediaRecorder.mimeType;
+                const blob = new Blob(audioChunks, { type: mimeType });
                 
-                console.log("Recorded blob size:", blob.size, "bytes");
+                console.log("Final blob size:", blob.size, "bytes");
+                console.log("MIME type:", mimeType);
                 
                 if (blob.size === 0) {
                     document.getElementById("status").innerHTML = "❌ Error: Recording is empty. Please try again.";
@@ -130,7 +175,15 @@ def home():
                     return;
                 }
                 
-                const file = new File([blob], "recording.webm", { type: mediaRecorder.mimeType });
+                // Determine file extension based on MIME type
+                let extension = 'webm';
+                if (mimeType.includes('mp4')) {
+                    extension = 'mp4';
+                } else if (mimeType.includes('ogg')) {
+                    extension = 'ogg';
+                }
+                
+                const file = new File([blob], `recording.${extension}`, { type: mimeType });
                 
                 const dataTransfer = new DataTransfer();
                 dataTransfer.items.add(file);
@@ -140,6 +193,7 @@ def home():
                 document.getElementById("hiddenName").value = document.getElementById("name").value;
                 
                 // Submit form automatically
+                document.getElementById("status").innerHTML = "⏳ Uploading...";
                 document.getElementById("reportForm").submit();
             };
         }
@@ -157,25 +211,23 @@ def submit():
         try:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             
-            # Save temporary webm file
-            temp_webm = os.path.join("temp_uploads", f"temp_{timestamp}.webm")
-            audio.save(temp_webm)
+            # Get the file extension from uploaded file
+            original_filename = audio.filename
+            extension = original_filename.split('.')[-1] if '.' in original_filename else 'webm'
             
-            # Convert to MP3
-            final_mp3 = os.path.join("voice_reports", f"{name}_{timestamp}.mp3")
+            # Save the audio file directly
+            filename = f"{name}_{timestamp}.{extension}"
+            filepath = os.path.join("voice_reports", filename)
+            audio.save(filepath)
             
-            # Load audio and convert to MP3
-            audio_segment = AudioSegment.from_file(temp_webm, format="webm")
-            audio_segment.export(final_mp3, format="mp3", bitrate="128k")
-            
-            # Remove temporary file
-            os.remove(temp_webm)
+            file_size = os.path.getsize(filepath)
+            print(f"Saved audio file: {filename}, size: {file_size} bytes")
             
             # Save to Excel
             wb = load_workbook("reports.xlsx")
             ws = wb.active
             date_formatted = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ws.append([name, date_formatted, f"{name}_{timestamp}.mp3"])
+            ws.append([name, date_formatted, filename])
             wb.save("reports.xlsx")
             
             return """
@@ -188,7 +240,7 @@ def submit():
             </head>
             <body>
                 <h3>✅ Report submitted successfully!</h3>
-                <p>Your voice recording has been converted to MP3 format.</p>
+                <p>Your voice recording has been saved.</p>
                 <p>Redirecting back to home page...</p>
                 <a href="/">Submit another report</a>
             </body>
@@ -196,6 +248,8 @@ def submit():
             """
         except Exception as e:
             print(f"Error processing audio: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return f"<h3>❌ Error processing audio: {str(e)}</h3><a href='/'>Go back</a>"
     else:
         return "<h3>❌ Error: Missing name or audio file</h3><a href='/'>Go back</a>"
@@ -230,7 +284,7 @@ def admin_login():
     password = request.form.get("password")
     if password == ADMIN_PASSWORD:
         resp = make_response(redirect("/admin"))
-        resp.set_cookie("admin_pass", ADMIN_PASSWORD)
+        resp.set_cookie("admin_pass", ADMIN_PASSWORD, max_age=86400)  # 24 hours
         return resp
     else:
         return "<h3>❌ Wrong Password</h3><a href='/admin_login'>Try again</a>"
@@ -250,8 +304,23 @@ def admin():
             a { text-decoration: none; color: #007bff; }
             a:hover { text-decoration: underline; }
             .file-list { margin-top: 20px; }
-            .file-item { padding: 8px; border-bottom: 1px solid #eee; }
+            .file-item { 
+                padding: 12px; 
+                border-bottom: 1px solid #eee; 
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
             .logout { float: right; color: #dc3545; }
+            .play-btn { 
+                background: #28a745; 
+                color: white; 
+                padding: 5px 10px; 
+                border: none; 
+                border-radius: 4px;
+                cursor: pointer;
+                margin-left: 10px;
+            }
         </style>
     </head>
     <body>
@@ -261,15 +330,34 @@ def admin():
             <a href='/download_all_audio'>🎧 Download All Audio (ZIP)</a><br><br>
         </p>
         
-        <h3>Individual Audio Files (""" + str(len(files)) + """ MP3 files):</h3>
+        <h3>Individual Audio Files (""" + str(len(files)) + """ files):</h3>
         <div class="file-list">
     """
     
     for f in files:
-        page += f"<div class='file-item'><a href='/audio/{f}' download>🎵 {f}</a></div>"
+        page += f"""
+        <div class='file-item'>
+            <span>🎵 {f}</span>
+            <div>
+                <button class='play-btn' onclick="playAudio('/audio/{f}')">▶ Play</button>
+                <a href='/audio/{f}' download style='margin-left:10px'>⬇ Download</a>
+            </div>
+        </div>
+        """
     
     page += """
         </div>
+        
+        <audio id="audioPlayer" controls style="display:none; margin-top:20px; width:100%;"></audio>
+        
+        <script>
+        function playAudio(url) {
+            const player = document.getElementById('audioPlayer');
+            player.src = url;
+            player.style.display = 'block';
+            player.play();
+        }
+        </script>
     </body>
     </html>
     """
@@ -292,7 +380,7 @@ def download_excel():
 def download_audio(filename):
     if not admin_protected(request):
         return redirect("/admin_login")
-    return send_from_directory("voice_reports", filename, as_attachment=True)
+    return send_from_directory("voice_reports", filename)
 
 @app.route("/download_all_audio")
 def download_all_audio():
