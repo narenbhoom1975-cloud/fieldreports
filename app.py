@@ -25,14 +25,43 @@ def home():
     <html>
     <head>
         <title>Engineer Voice Report</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            button { padding: 10px 20px; margin: 5px; font-size: 16px; cursor: pointer; }
+            body { 
+                font-family: Arial, sans-serif; 
+                margin: 20px; 
+                max-width: 600px;
+                margin-left: auto;
+                margin-right: auto;
+            }
+            button { 
+                padding: 10px 20px; 
+                margin: 5px; 
+                font-size: 16px; 
+                cursor: pointer;
+                border: none;
+                border-radius: 5px;
+            }
             button:disabled { opacity: 0.5; cursor: not-allowed; }
-            input[type="text"] { padding: 8px; width: 300px; font-size: 14px; }
+            input[type="text"] { 
+                padding: 10px; 
+                width: 100%; 
+                max-width: 400px;
+                font-size: 16px;
+                border: 2px solid #ddd;
+                border-radius: 5px;
+                box-sizing: border-box;
+            }
             #status { color: #007bff; font-weight: bold; margin-top: 10px; }
             .recording { color: #dc3545; }
-            #timer { font-size: 20px; color: #dc3545; }
+            #timer { font-size: 20px; color: #dc3545; margin: 10px 0; }
+            #startBtn { background: #28a745; color: white; }
+            #stopBtn { background: #dc3545; color: white; }
+            @media (max-width: 600px) {
+                body { margin: 15px; }
+                button { width: 100%; margin: 5px 0; }
+                input[type="text"] { width: 100%; }
+            }
         </style>
     </head>
     <body>
